@@ -227,8 +227,6 @@ def add_hook_to_image(expanded_image, hook_image, padding, hook_space):
     hook_x = hook_center_x - hook_width // 2
     hook_y = top_y - hook_height
     
-    print(f"Hook position: ({hook_x}, {hook_y})")
-    
     # Di chuyển móc lên trên cho đến khi không còn overlap
     while check_overlap(expanded_image, hook_y, hook_x, hook_image):
         hook_y -= 1
