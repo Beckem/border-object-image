@@ -6,7 +6,7 @@ import cv2
 CONFIG = {
   "padding_min": 10,  # Minimum padding in pixels
   "padding_ratio": 0.01,  # Padding as a percentage of image size
-  "hook_size_min": 30,  # Minimum size of the hook in pixels
+  "hook_size_min": 40,  # Minimum size of the hook in pixels
   "hook_size_ratio": 0.08,  # Hook size as a percentage of image size
   "hook_space_ratio": 0.05,  # Space for the hook as a percentage of image size
   "min_limit_x" : 0.4,  # Minimum limit for x coordinate of hook (% of image width)
@@ -121,7 +121,7 @@ def check_overlap(expanded_image, hook_y, hook_x, hook_image):
 
 def get_top_point(expanded_image, center_x, min_x, max_x):
     """
-    Tìm điểm cao nhất trong khoảng giữa hoặc tại center_x
+    Tìm điểm cao nhất toàn bộ trước, nếu không nằm trong khoảng giới hạn thì dùng điểm cao nhất tại center_x
     
     Args:
         expanded_image: Ảnh đã expand
@@ -132,39 +132,38 @@ def get_top_point(expanded_image, center_x, min_x, max_x):
     Returns:
         tuple: (top_x, top_y) - tọa độ điểm cao nhất
     """
-    # Tính khoảng giữa dựa trên min_x và max_x
+    # Tính khoảng giới hạn dựa trên min_x và max_x
     width = max_x - min_x
-    mid_start = min_x + int(width * CONFIG['min_limit_x'])
-    mid_end = min_x + int(width * CONFIG['max_limit_x'])
+    limit_start = min_x + int(width * CONFIG['min_limit_x'])
+    limit_end = min_x + int(width * CONFIG['max_limit_x'])
 
-    # Tìm điểm cao nhất trong khoảng giữa
+    # Tìm điểm cao nhất toàn bộ
     alpha = expanded_image[:, :, 3]
-    mid_region = alpha[:, mid_start:mid_end]
-    non_transparent = np.where(mid_region > 0)
+    non_transparent = np.where(alpha > 0)
     
     if len(non_transparent[0]) > 0:
-        # Có pixel trong vùng giữa
+        # Tìm điểm cao nhất toàn bộ
         top_y = np.min(non_transparent[0])
         # Tìm tất cả x có cùng y cao nhất
         top_xs = non_transparent[1][non_transparent[0] == top_y]
         # Lấy x ở giữa các điểm cao nhất
-        top_x = mid_start + int(np.mean(top_xs))
-        return top_x, top_y
+        global_top_x = int(np.mean(top_xs))
+        
+        # Kiểm tra xem điểm cao nhất toàn bộ có nằm trong khoảng giới hạn không
+        if limit_start <= global_top_x <= limit_end:
+            return global_top_x, top_y
+        else:
+            # Sử dụng điểm cao nhất tại center_x
+            alpha_column = expanded_image[:, center_x, 3]
+            non_transparent_y = np.where(alpha_column > 0)[0]
+            if len(non_transparent_y) > 0:
+                center_top_y = np.min(non_transparent_y)
+                return center_x, center_top_y
+            else:
+                # Nếu không tìm thấy tại center_x, vẫn dùng điểm cao nhất toàn bộ
+                return global_top_x, top_y
     
-    # Nếu không tìm thấy trong khoảng giữa, sử dụng center_x
-    alpha_column = expanded_image[:, center_x, 3]
-    non_transparent_y = np.where(alpha_column > 0)[0]
-    if len(non_transparent_y) > 0:
-        return center_x, np.min(non_transparent_y)
-    
-    # Nếu không tìm thấy tại center_x, tìm điểm cao nhất toàn bộ
-    non_transparent = np.where(alpha > 0)
-    if len(non_transparent[0]) > 0:
-        top_y = np.min(non_transparent[0])
-        top_xs = non_transparent[1][non_transparent[0] == top_y]
-        top_x = int(np.mean(top_xs))
-        return top_x, top_y
-    
+    # Fallback: nếu không tìm thấy pixel nào
     return center_x, 0
 
 def add_hook_to_image(expanded_image, hook_image, padding, hook_space):
@@ -223,10 +222,12 @@ def add_hook_to_image(expanded_image, hook_image, padding, hook_space):
     
     # Tìm tọa độ điểm cao nhất phù hợp
     hook_center_x, top_y = get_top_point(expanded_image, center_x, min_x, max_x)
-    
+
     # Đặt móc ban đầu
     hook_x = hook_center_x - hook_width // 2
     hook_y = top_y - hook_height
+    
+    print(f"Hook position: ({hook_x}, {hook_y})")
     
     # Di chuyển móc lên trên cho đến khi không còn overlap
     while check_overlap(expanded_image, hook_y, hook_x, hook_image):
