@@ -1,25 +1,18 @@
-from pathlib import Path
+import os
 import numpy as np
 import cv2
 
 # Configuration constants for border and hook parameters
 CONFIG = {
-  "padding_min": 10,  # Minimum padding in pixels
-  "padding_ratio": 0.01,  # Padding as a percentage of image size
   "hook_size_min": 40,  # Minimum size of the hook in pixels
   "hook_size_ratio": 0.08,  # Hook size as a percentage of image size
-  "hook_space_ratio": 0.05,  # Space for the hook as a percentage of image size
   "min_limit_x" : 0.4,  # Minimum limit for x coordinate of hook (% of image width)
   "max_limit_x" : 0.6,  # Maximum limit for x coordinate of hook (% of image width)
-  "border_width_ratio": 0.006,  # Border width as a percentage of image size
-  "border_min_width": 4,  # Minimum border width in pixels
-  "thickness_ratio": 0.003,  # Thickness of hook border as a percentage of image size
-  "min_thickness": 2,  # Minimum thickness of hook border in pixels
   "inner_radius_ratio": 0.25,  # Inner radius of hook border as a percentage of hook size
   "border_color": [64, 21, 243], # Border color in BGR format
 }
 
-def add_hook_image_and_border(image_path, output_path, hook_image_path='circle.png'):
+def add_hook_image_and_border(image_path, output_path, hook_image_path='circle.png', thickness=3, border_padding=4):
     """
     Thêm ảnh móc treo và viền đỏ bo tròn cho ảnh nền trong suốt
     
@@ -65,7 +58,7 @@ def add_hook_image_and_border(image_path, output_path, hook_image_path='circle.p
     
     # Điều chỉnh padding theo kích thước ảnh
     img_size = max(image.shape[:2])
-    padding = max(CONFIG['padding_min'], int(img_size * CONFIG['padding_ratio']))  
+    padding = (thickness + border_padding) * 2
 
     # Tính toán kích thước móc phù hợp
     hook_size = max(CONFIG['hook_size_min'], int(img_size * CONFIG['hook_size_ratio'])) 
@@ -77,24 +70,21 @@ def add_hook_image_and_border(image_path, output_path, hook_image_path='circle.p
         print(f"Lỗi khi resize ảnh móc: {e}")
         print(f"Kích thước ảnh móc: {hook_image.shape}")
         return False
-    
-    # Tính khoảng trống cho móc treo (% của kích thước ảnh)
-    hook_space = max(hook_size, int(img_size * CONFIG['hook_space_ratio'])) 
 
     # Mở rộng canvas với khoảng trống cố định cho móc ở phía trên
     expanded_image = cv2.copyMakeBorder(
-        image, padding + hook_space, padding, padding, padding, 
+        image, padding + hook_size, padding, padding, padding, 
         cv2.BORDER_CONSTANT, value=[0, 0, 0, 0]  # Padding trong suốt
     )
     
     # Bước 2: Thêm móc treo vào ảnh
-    image_with_hook = add_hook_to_image(expanded_image, hook_resized, padding, hook_space)
+    image_with_hook = add_hook_to_image(expanded_image, hook_resized)
 
     # Bước 3: Tạo border tròn bên trong móc treo và lưu lại
-    hook_border_mask = create_inner_circle_border_mask(expanded_image, hook_resized, padding, hook_space)
+    hook_border_mask = create_inner_circle_border_mask(expanded_image, hook_resized, thickness)
 
     # Bước 4: Tạo border toàn bộ vật thể và lưu lại
-    main_border_mask = create_main_border_mask(image_with_hook)
+    main_border_mask = create_main_border_mask(image_with_hook, thickness, border_padding)
     
     # Bước 5: Áp dụng cả 2 border lên ảnh gốc đã expand (không có móc)
     final_result = apply_borders_to_clean_image(expanded_image, hook_border_mask, main_border_mask)
@@ -166,7 +156,7 @@ def get_top_point(expanded_image, center_x, min_x, max_x):
     # Fallback: nếu không tìm thấy pixel nào
     return center_x, 0
 
-def add_hook_to_image(expanded_image, hook_image, padding, hook_space):
+def add_hook_to_image(expanded_image, hook_image):
     """
     Thêm ảnh móc treo vào vị trí giữa trên của vật thể
     """
@@ -265,15 +255,14 @@ def add_hook_to_image(expanded_image, hook_image, padding, hook_space):
     
     return result
 
-def create_inner_circle_border_mask(expanded_image, hook_image, padding, hook_space):
+def create_inner_circle_border_mask(expanded_image, hook_image, thickness):
     """
     Tạo mask cho border tròn bên trong móc treo
     
     Args:
         expanded_image: Ảnh gốc đã expand (chưa có móc)
         hook_image: Ảnh móc treo gốc
-        padding: Padding gốc
-        hook_space: Khoảng trống dành cho móc treo
+        thickness: Độ dày của border tròn
     
     Returns:
         Mask cho border tròn (numpy array)
@@ -361,10 +350,6 @@ def create_inner_circle_border_mask(expanded_image, hook_image, padding, hook_sp
     # Tính bán kính cho đường tròn bên trong
     inner_radius = int(min(hook_width, hook_height) * CONFIG['inner_radius_ratio'])
     
-    # Lấy thickness
-    img_size = max(expanded_image.shape[:2])
-    thickness = max(CONFIG['min_thickness'], int(CONFIG['thickness_ratio'] * img_size))
-    
     # Tạo mask cho border tròn
     border_mask = np.zeros((height, width), dtype=np.uint8)
     cv2.circle(border_mask, (hook_center_x, hook_center_y), inner_radius, 255, thickness)
@@ -374,7 +359,7 @@ def create_inner_circle_border_mask(expanded_image, hook_image, padding, hook_sp
     
     return border_mask
 
-def create_main_border_mask(image_with_hook):
+def create_main_border_mask(image_with_hook, thickness, border_padding):
     """
     Tạo mask cho border chính của toàn bộ vật thể
     
@@ -388,24 +373,15 @@ def create_main_border_mask(image_with_hook):
     alpha = image_with_hook[:, :, 3]
     mask = cv2.threshold(alpha, 1, 255, cv2.THRESH_BINARY)[1]
     
-    # Điều chỉnh các thông số theo kích thước ảnh
-    img_size = max(image_with_hook.shape[:2])
     
-    # Border width: scale theo kích thước ảnh
-    border_width = max(CONFIG['border_min_width'], int(img_size * CONFIG['border_width_ratio'])) 
 
     # Kernel tròn để tạo hiệu ứng bo tròn
-    kernel_size = border_width * 2 + 1
+    kernel_size = (border_padding + thickness // 2) * 2 + 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     
     # Tạo mask dilated với kernel tròn
     dilated_mask = cv2.dilate(mask, kernel, iterations=1)
     
-    # Làm mịn mask để tạo hiệu ứng mềm mại
-    smooth_kernel_size = max(CONFIG['border_min_width'] // 2 , border_width // 2)
-    if smooth_kernel_size % 2 == 0:
-        smooth_kernel_size += 1
-    dilated_mask = cv2.GaussianBlur(dilated_mask, (smooth_kernel_size, smooth_kernel_size), 0)
     
     # Tìm contours và tạo border
     contours, _ = cv2.findContours(
@@ -416,17 +392,21 @@ def create_main_border_mask(image_with_hook):
     
     # Tạo mask cho border
     border_layer = np.zeros_like(dilated_mask)
-    thickness = max(CONFIG['min_thickness'], int(CONFIG['thickness_ratio'] * img_size))
     cv2.drawContours(border_layer, contours, -1, 255, thickness=thickness)
     
     # Loại bỏ phần bên trong để chỉ giữ lại border
-    erode_size = max(1, border_width - thickness)
-    erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_size, erode_size))
-    inner_mask = cv2.erode(mask, erode_kernel, iterations=1)
-    only_border = cv2.bitwise_and(border_layer, cv2.bitwise_not(inner_mask))
-    
+    only_border = border_layer.copy()
+    if (border_padding > 0):
+        erode_size = border_padding
+        erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_size, erode_size))
+        inner_mask = cv2.erode(mask, erode_kernel, iterations=1)
+        only_border = cv2.bitwise_and(border_layer, cv2.bitwise_not(inner_mask))
+
     # Làm mịn border để có cạnh smooth
-    only_border = cv2.GaussianBlur(only_border, (3, 3), 0)
+    smooth_kernel_size = thickness
+    if smooth_kernel_size % 2 == 0:
+        smooth_kernel_size += 1
+    only_border = cv2.GaussianBlur(only_border, (smooth_kernel_size, smooth_kernel_size), 0)
     
     return only_border
 
@@ -487,59 +467,61 @@ def process_all_images(input_folder='input', output_folder='output', hook_image_
         output_folder (str): Tên folder để lưu ảnh kết quả
         hook_image_path (str): Đường dẫn đến ảnh móc treo
     """
-    # Convert all paths to Path objects
-    hook_path = Path(hook_image_path)
-    input_path = Path(input_folder)
-    output_path = Path(output_folder)
-    
     # Kiểm tra ảnh móc treo có tồn tại không
-    if not hook_path.exists():
-        print(f"Không tìm thấy ảnh móc treo: {hook_path}")
+    if not os.path.exists(hook_image_path):
+        print(f"Không tìm thấy ảnh móc treo: {hook_image_path}")
         return
     
     # Tạo folder output nếu chưa tồn tại
-    output_path.mkdir(exist_ok=True)
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
     
     # Các định dạng ảnh được hỗ trợ
     supported_formats = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif'}
     
-    if not input_path.exists():
+    if not os.path.exists(input_folder):
         print(f"Folder '{input_folder}' không tồn tại!")
         return
     
-    image_files = [f for f in input_path.iterdir() 
-                   if f.is_file() and f.suffix.lower() in supported_formats]
+    # Lấy danh sách file ảnh
+    image_files = []
+    for filename in os.listdir(input_folder):
+        file_path = os.path.join(input_folder, filename)
+        if os.path.isfile(file_path):
+            _, ext = os.path.splitext(filename)
+            if ext.lower() in supported_formats:
+                image_files.append(filename)
     
     if not image_files:
         print(f"Không tìm thấy ảnh nào trong folder '{input_folder}'!")
         return
     
     print(f"Tìm thấy {len(image_files)} ảnh để xử lý...")
-    print(f"Sử dụng ảnh móc treo: {hook_path}")
+    print(f"Sử dụng ảnh móc treo: {hook_image_path}")
     
     processed_count = 0
     failed_count = 0
     
     for image_file in image_files:
-        output_filename = f"{image_file.stem}_with_border{image_file.suffix}"
-        output_file = output_path / output_filename
+        input_file_path = os.path.join(input_folder, image_file)
+        filename_without_ext, ext = os.path.splitext(image_file)
+        output_filename = f"{filename_without_ext}_with_border{ext}"
+        output_file_path = os.path.join(output_folder, output_filename)
         
-        print(f"Đang xử lý: {image_file.name}")
+        print(f"Đang xử lý: {image_file}")
         
-        if add_hook_image_and_border(str(image_file), str(output_file), str(hook_path)):
+        if add_hook_image_and_border(input_file_path, output_file_path, hook_image_path):
             processed_count += 1
             print(f"  ✓ Đã lưu: {output_filename}")
         else:
             failed_count += 1
-            print(f"  ✗ Lỗi khi xử lý: {image_file.name}")
+            print(f"  ✗ Lỗi khi xử lý: {image_file}")
     
     print(f"\nHoàn thành!")
     print(f"- Đã xử lý thành công: {processed_count} ảnh")
     print(f"- Lỗi: {failed_count} ảnh")
-    print(f"- Kết quả được lưu trong folder '{output_path}'")
+    print(f"- Kết quả được lưu trong folder '{output_folder}'")
 
 if __name__ == "__main__":
     # Chạy xử lý batch cho tất cả ảnh
     process_all_images()
-
-
