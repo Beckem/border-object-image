@@ -2,6 +2,9 @@ import os
 import numpy as np
 import cv2
 
+HOOK_IMAGE_PATH = "circle.png"
+
+
 # Configuration constants for border and hook parameters
 CONFIG = {
   "hook_size_min": 40,  # Minimum size of the hook in pixels
@@ -12,82 +15,124 @@ CONFIG = {
   "border_color": [64, 21, 243], # Border color in BGR format
 }
 
-def add_hook_image_and_border(image_path, output_path, hook_image_path='circle.png', thickness=3, border_padding=4):
+def hex_to_bgr(hex_color: str) -> list:
     """
-    Thêm ảnh móc treo và viền đỏ bo tròn cho ảnh nền trong suốt
-    
+    Convert hex color string (e.g. '#f3202c') to BGR list for OpenCV.
+    """
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) != 6:
+        raise ValueError("Hex color must be 6 digits")
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return [b, g, r]
+
+def upscale_image(cv_image, scale_factor=2):
+    """
+    Upscale ảnh sử dụng OpenCV 
     Args:
-        image_path (str): Đường dẫn đến ảnh đầu vào (phải có nền trong suốt)
-        output_path (str): Đường dẫn để lưu ảnh kết quả
-        hook_image_path (str): Đường dẫn đến ảnh móc treo
+        cv_image: numpy array (BGR hoặc BGRA)
+        scale_factor: tỷ lệ phóng to (2, 3, 4)
     """
-    # Đọc ảnh đầu vào
+    print(f"Đang upscale ảnh {scale_factor}x")
+
+    has_alpha = cv_image.shape[2] == 4 if len(cv_image.shape) == 3 else False
+    bgr = cv_image[..., :3]
+
+    h, w = bgr.shape[:2]
+    upscaled_bgr = cv2.resize(bgr, (w * scale_factor, h * scale_factor), interpolation=cv2.INTER_CUBIC)
+
+    if has_alpha:
+        alpha = cv_image[..., 3]
+        alpha_up = cv2.resize(alpha, (upscaled_bgr.shape[1], upscaled_bgr.shape[0]), interpolation=cv2.INTER_CUBIC)
+        result = np.dstack([upscaled_bgr, alpha_up])
+    else:
+        result = upscaled_bgr
+
+    return result
+
+def processed_image(image_path: str, output_path: str, border_thickness_px: int, border_padding_px: int, border_color: str, show_hook: bool):
+    reference_size = 1000
     image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     
     if image is None:
-        print(f"Không thể đọc ảnh: {image_path}")
-        return False
+        return {"status": "error", "message": "Không thể đọc ảnh"}
     
     if len(image.shape) != 3 or image.shape[2] != 4:
-        print(f"Ảnh phải có 4 channels (BGRA): {image_path}")
-        return False
+        return {"status": "error", "message": "Ảnh phải có 4 channels (BGRA)"}
+
+    hook_image = cv2.imread(HOOK_IMAGE_PATH, cv2.IMREAD_UNCHANGED)
     
-    # Đọc ảnh móc treo
-    hook_image = cv2.imread(hook_image_path, cv2.IMREAD_UNCHANGED)
+    if not os.path.exists(HOOK_IMAGE_PATH):
+        return {"status": "error", "message": f"Không tìm thấy ảnh móc treo: {HOOK_IMAGE_PATH}"}
     
-    if hook_image is None:
-        print(f"Không thể đọc ảnh móc treo: {hook_image_path}")
-        return False
-    
-    # Kiểm tra và xử lý số channels của ảnh móc
     if len(hook_image.shape) == 2:
-        # Ảnh grayscale, chuyển thành BGR
         hook_image = cv2.cvtColor(hook_image, cv2.COLOR_GRAY2BGR)
     
-    # Đảm bảo ảnh móc có alpha channel
     if len(hook_image.shape) == 3 and hook_image.shape[2] == 3:
-        # Nếu chỉ có 3 channels (BGR), thêm alpha channel
         hook_alpha = np.ones((hook_image.shape[0], hook_image.shape[1], 1), dtype=np.uint8) * 255
         hook_image = np.concatenate([hook_image, hook_alpha], axis=2)
     elif len(hook_image.shape) == 3 and hook_image.shape[2] == 4:
-        # Đã có 4 channels, giữ nguyên
         pass
     else:
-        print(f"Định dạng ảnh móc không được hỗ trợ: {hook_image.shape}")
-        return False
+        return {"status": "error", "message": f"Định dạng ảnh móc không được hỗ trợ: {hook_image.shape}"}
     
-    # Điều chỉnh padding theo kích thước ảnh
-    img_size = max(image.shape[:2])
-    padding = (thickness + border_padding) * 2
+    h, w = image.shape[:2]
+    print(f"Width x Height: {w}x{h}")
+    area = w * h
+    
+    # Upscale và độ dày stroke dựa trên diện tích ảnh
+    if area < 200000:
+        scale_factor = 8
+    elif area < 500000:
+        scale_factor = 4
+    elif area < 1000000:
+        scale_factor = 3
+    elif area < 2000000:
+        scale_factor = 2
+    else:
+        scale_factor = 1
 
-    # Tính toán kích thước móc phù hợp
+    if scale_factor > 1:
+        image = upscale_image(image, scale_factor) 
+        hook_image = upscale_image(hook_image, scale_factor)
+    else:
+        print("Không cần upscale")
+    
+    # Tính toán border dựa trên kích thước ảnh để đảm bảo tỷ lệ nhất quán
+    # Sử dụng kích thước nhỏ hơn (min) để đảm bảo border không quá dày
+    img_size = min(image.shape[:2])
+    
+    # Tính tỷ lệ so với kích thước tham chiếu (1000px)
+    scale_ratio = img_size / reference_size
+    
+    # Áp dụng tỷ lệ cho border
+    border_thickness = max(1, int(border_thickness_px * scale_ratio))
+    border_padding = max(1, int(border_padding_px * scale_ratio))
+    
+    img_size = max(image.shape[:2])
+    padding = (border_thickness + border_padding)
     hook_size = max(CONFIG['hook_size_min'], int(img_size * CONFIG['hook_size_ratio'])) 
 
-    # Resize ảnh móc theo kích thước tính toán
     try:
         hook_resized = cv2.resize(hook_image, (hook_size, hook_size), interpolation=cv2.INTER_AREA)
     except cv2.error as e:
-        print(f"Lỗi khi resize ảnh móc: {e}")
-        print(f"Kích thước ảnh móc: {hook_image.shape}")
-        return False
+        return {"status": "error", "message": f"Lỗi khi resize ảnh móc: {e}, Kích thước ảnh móc: {hook_image.shape}"}
 
-    # Mở rộng canvas với khoảng trống cố định cho móc ở phía trên
     expanded_image = cv2.copyMakeBorder(
         image, padding + hook_size, padding, padding, padding, 
-        cv2.BORDER_CONSTANT, value=[0, 0, 0, 0]  # Padding trong suốt
+        cv2.BORDER_CONSTANT, value=[0, 0, 0, 0]
     )
     
-    # Bước 2: Thêm móc treo vào ảnh
     image_with_hook = add_hook_to_image(expanded_image, hook_resized)
-
-    # Bước 3: Tạo border tròn bên trong móc treo và lưu lại
-    hook_border_mask = create_inner_circle_border_mask(expanded_image, hook_resized, thickness)
-
-    # Bước 4: Tạo border toàn bộ vật thể và lưu lại
-    main_border_mask = create_main_border_mask(image_with_hook, thickness, border_padding)
+    hook_border_mask = create_inner_circle_border_mask(expanded_image, hook_resized, border_thickness)
+    main_border_mask = create_main_border_mask(image_with_hook, border_thickness, border_padding)
     
-    # Bước 5: Áp dụng cả 2 border lên ảnh gốc đã expand (không có móc)
-    final_result = apply_borders_to_clean_image(expanded_image, hook_border_mask, main_border_mask)
+    tmp_image = expanded_image.copy()
+    if show_hook:
+        tmp_image = image_with_hook.copy()
+    
+    final_result = apply_borders_to_clean_image(tmp_image, hook_border_mask, main_border_mask, border_color, show_hook)
     
     # Bước 6: Lưu ảnh kết quả
     cv2.imwrite(output_path, final_result)
@@ -255,14 +300,14 @@ def add_hook_to_image(expanded_image, hook_image):
     
     return result
 
-def create_inner_circle_border_mask(expanded_image, hook_image, thickness):
+def create_inner_circle_border_mask(expanded_image, hook_image, border_thickness):
     """
     Tạo mask cho border tròn bên trong móc treo
     
     Args:
         expanded_image: Ảnh gốc đã expand (chưa có móc)
         hook_image: Ảnh móc treo gốc
-        thickness: Độ dày của border tròn
+        border_thickness: Độ dày của border tròn
     
     Returns:
         Mask cho border tròn (numpy array)
@@ -352,14 +397,14 @@ def create_inner_circle_border_mask(expanded_image, hook_image, thickness):
     
     # Tạo mask cho border tròn
     border_mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.circle(border_mask, (hook_center_x, hook_center_y), inner_radius, 255, thickness)
+    cv2.circle(border_mask, (hook_center_x, hook_center_y), inner_radius, 255, border_thickness)
     
     # Làm mịn
     border_mask = cv2.GaussianBlur(border_mask, (3, 3), 0)
     
     return border_mask
 
-def create_main_border_mask(image_with_hook, thickness, border_padding):
+def create_main_border_mask(image_with_hook, border_thickness, border_padding):
     """
     Tạo mask cho border chính của toàn bộ vật thể
     
@@ -373,15 +418,15 @@ def create_main_border_mask(image_with_hook, thickness, border_padding):
     alpha = image_with_hook[:, :, 3]
     mask = cv2.threshold(alpha, 1, 255, cv2.THRESH_BINARY)[1]
     
-    
+    # Border width: scale theo kích thước ảnh
+    border_width = border_thickness + border_padding
 
     # Kernel tròn để tạo hiệu ứng bo tròn
-    kernel_size = (border_padding + thickness // 2) * 2 + 1
+    kernel_size = (border_padding + border_thickness // 2) * 2 + 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     
     # Tạo mask dilated với kernel tròn
     dilated_mask = cv2.dilate(mask, kernel, iterations=1)
-    
     
     # Tìm contours và tạo border
     contours, _ = cv2.findContours(
@@ -392,7 +437,7 @@ def create_main_border_mask(image_with_hook, thickness, border_padding):
     
     # Tạo mask cho border
     border_layer = np.zeros_like(dilated_mask)
-    cv2.drawContours(border_layer, contours, -1, 255, thickness=thickness)
+    cv2.drawContours(border_layer, contours, -1, 255, thickness=border_thickness)
     
     # Loại bỏ phần bên trong để chỉ giữ lại border
     only_border = border_layer.copy()
@@ -401,16 +446,16 @@ def create_main_border_mask(image_with_hook, thickness, border_padding):
         erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_size, erode_size))
         inner_mask = cv2.erode(mask, erode_kernel, iterations=1)
         only_border = cv2.bitwise_and(border_layer, cv2.bitwise_not(inner_mask))
-
+    
     # Làm mịn border để có cạnh smooth
-    smooth_kernel_size = thickness
+    smooth_kernel_size = border_thickness
     if smooth_kernel_size % 2 == 0:
         smooth_kernel_size += 1
     only_border = cv2.GaussianBlur(only_border, (smooth_kernel_size, smooth_kernel_size), 0)
     
     return only_border
 
-def apply_borders_to_clean_image(clean_image, hook_border_mask, main_border_mask):
+def apply_borders_to_clean_image(clean_image, hook_border_mask, main_border_mask, border_color, show_hook):
     """
     Áp dụng cả 2 border lên ảnh gốc đã expand (không có móc)
     
@@ -418,13 +463,15 @@ def apply_borders_to_clean_image(clean_image, hook_border_mask, main_border_mask
         clean_image: Ảnh gốc đã expand (không có móc treo)
         hook_border_mask: Mask cho border tròn bên trong móc
         main_border_mask: Mask cho border chính
+        show_hook: Hiển thị border móc treo hay không
     
     Returns:
         Ảnh với cả 2 border được áp dụng
     """
     result = clean_image.copy()
-    
-    border_color = np.array(CONFIG['border_color'], dtype=np.uint8)
+
+    bgr = hex_to_bgr(border_color)  
+    bd_color = np.array(bgr, dtype=np.uint8)
 
     # Áp dụng border chính
     main_border_pixels = main_border_mask > 10
@@ -433,7 +480,7 @@ def apply_borders_to_clean_image(clean_image, hook_border_mask, main_border_mask
         
         for c in range(3):  # BGR channels
             result[main_border_pixels, c] = (
-                alpha_values * border_color[c] + 
+                alpha_values * bd_color[c] + 
                 (1 - alpha_values) * result[main_border_pixels, c]
             ).astype(np.uint8)
         
@@ -442,19 +489,20 @@ def apply_borders_to_clean_image(clean_image, hook_border_mask, main_border_mask
         result[main_border_pixels, 3] = np.maximum(result[main_border_pixels, 3], new_alpha)
     
     # Áp dụng border tròn (móc)
-    hook_border_pixels = hook_border_mask > 10
-    if np.any(hook_border_pixels):
-        alpha_values = hook_border_mask[hook_border_pixels] / 255.0
-        
-        for c in range(3):  # BGR channels
-            result[hook_border_pixels, c] = (
-                alpha_values * border_color[c] + 
-                (1 - alpha_values) * result[hook_border_pixels, c]
-            ).astype(np.uint8)
-        
-        # Cập nhật alpha channel
-        new_alpha = (alpha_values * 255).astype(np.uint8)
-        result[hook_border_pixels, 3] = np.maximum(result[hook_border_pixels, 3], new_alpha)
+    if not show_hook:
+        hook_border_pixels = hook_border_mask > 10
+        if np.any(hook_border_pixels):
+            alpha_values = hook_border_mask[hook_border_pixels] / 255.0
+            
+            for c in range(3):  # BGR channels
+                result[hook_border_pixels, c] = (
+                    alpha_values * bd_color[c] + 
+                    (1 - alpha_values) * result[hook_border_pixels, c]
+                ).astype(np.uint8)
+            
+            # Cập nhật alpha channel
+            new_alpha = (alpha_values * 255).astype(np.uint8)
+            result[hook_border_pixels, 3] = np.maximum(result[hook_border_pixels, 3], new_alpha)
     
     return result
 
@@ -510,7 +558,10 @@ def process_all_images(input_folder='input', output_folder='output', hook_image_
         
         print(f"Đang xử lý: {image_file}")
         
-        if add_hook_image_and_border(input_file_path, output_file_path, hook_image_path):
+        # Sử dụng giá trị pixel tương đối với ảnh 1000x1000px
+        # border_thickness_px: 5px trên ảnh 1000x1000px
+        # border_padding_px: 8px trên ảnh 1000x1000px
+        if processed_image(input_file_path, output_file_path, 5, 8, "#f3202c", True):
             processed_count += 1
             print(f"  ✓ Đã lưu: {output_filename}")
         else:
