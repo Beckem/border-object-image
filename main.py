@@ -8,10 +8,10 @@ HOOK_IMAGE_PATH = "circle.png"
 # Configuration constants for border and hook parameters
 CONFIG = {
   "hook_size_min": 40,  # Minimum size of the hook in pixels
-  "hook_size_ratio": 0.08,  # Hook size as a percentage of image size
+  "hook_size_ratio": 0.12,  # Hook size as a percentage of image size
   "min_limit_x" : 0.4,  # Minimum limit for x coordinate of hook (% of image width)
   "max_limit_x" : 0.6,  # Maximum limit for x coordinate of hook (% of image width)
-  "inner_radius_ratio": 0.25,  # Inner radius of hook border as a percentage of hook size
+  "inner_radius_ratio": 0.23,  # Inner radius of hook border as a percentage of hook size
   "border_color": [64, 21, 243], # Border color in BGR format
 }
 
@@ -51,7 +51,7 @@ def upscale_image(cv_image, scale_factor=2):
 
     return result
 
-def processed_image(image_path: str, output_path: str, border_thickness_px: int, border_padding_px: int, border_color: str, show_hook: bool):
+def processed_image_dual_hooks(image_path: str, output_path_global: str, output_path_center: str, border_thickness_px: int, border_padding_px: int, border_color: str, show_hook: bool):
     reference_size = 1000
     image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     
@@ -81,7 +81,7 @@ def processed_image(image_path: str, output_path: str, border_thickness_px: int,
     print(f"Width x Height: {w}x{h}")
     area = w * h
     
-    # Upscale và độ dày stroke dựa trên diện tích ảnh
+    # Upscale dựa trên diện tích ảnh
     if area < 200000:
         scale_factor = 8
     elif area < 500000:
@@ -98,8 +98,10 @@ def processed_image(image_path: str, output_path: str, border_thickness_px: int,
         hook_image = upscale_image(hook_image, scale_factor)
     else:
         print("Không cần upscale")
+        
     
-    # Tính toán border dựa trên kích thước ảnh để đảm bảo tỷ lệ nhất quán
+    
+    # Tính toán border và hook size dựa trên kích thước ảnh để đảm bảo tỷ lệ nhất quán
     # Sử dụng kích thước nhỏ hơn (min) để đảm bảo border không quá dày
     img_size = min(image.shape[:2])
     
@@ -110,9 +112,15 @@ def processed_image(image_path: str, output_path: str, border_thickness_px: int,
     border_thickness = max(1, int(border_thickness_px * scale_ratio))
     border_padding = max(1, int(border_padding_px * scale_ratio))
     
+    # Tính hook size tương đối với kích thước tham chiếu
+    # Hook size mặc định là 80px trên ảnh 1000x1000px (8% của 1000px)
+    hook_size_base = int(reference_size * CONFIG['hook_size_ratio'])  # 80px trên ảnh 1000px
+    hook_size = max(CONFIG['hook_size_min'], int(hook_size_base * scale_ratio))
+    
     img_size = max(image.shape[:2])
     padding = (border_thickness + border_padding)
-    hook_size = max(CONFIG['hook_size_min'], int(img_size * CONFIG['hook_size_ratio'])) 
+    
+    print(f"Hook size: {hook_size} (scale ratio: {scale_ratio:.2f})")
 
     try:
         hook_resized = cv2.resize(hook_image, (hook_size, hook_size), interpolation=cv2.INTER_AREA)
@@ -124,19 +132,93 @@ def processed_image(image_path: str, output_path: str, border_thickness_px: int,
         cv2.BORDER_CONSTANT, value=[0, 0, 0, 0]
     )
     
-    image_with_hook = add_hook_to_image(expanded_image, hook_resized)
-    hook_border_mask = create_inner_circle_border_mask(expanded_image, hook_resized, border_thickness)
-    main_border_mask = create_main_border_mask(image_with_hook, border_thickness, border_padding)
+    # Tìm vị trí vật thể để tính toán vị trí hook
+    alpha = expanded_image[:, :, 3]
+    non_transparent = np.where(alpha > 0)
     
-    tmp_image = expanded_image.copy()
+    if len(non_transparent[0]) == 0:
+        return {"status": "error", "message": "Không tìm thấy vật thể trong ảnh"}
+    
+    # Tìm tọa độ x ở vị trí y giữa của vật thể
+    min_y = np.min(non_transparent[0])
+    max_y = np.max(non_transparent[0])
+    middle_y = (min_y + max_y) // 2
+    middle_row_mask = (non_transparent[0] == middle_y)
+    middle_row_x_coords = non_transparent[1][middle_row_mask]
+    
+    if len(middle_row_x_coords) == 0:
+        # Nếu không tìm được pixel ở giữa chính xác, tìm pixel gần nhất
+        nearest_y = min_y
+        min_distance = abs(middle_y - min_y)
+        
+        for y in range(min_y, max_y + 1):
+            row_mask = (non_transparent[0] == y)
+            if np.any(row_mask):
+                distance = abs(middle_y - y)
+                if distance < min_distance:
+                    min_distance = distance
+                    nearest_y = y
+        
+        row_mask = (non_transparent[0] == nearest_y)
+        middle_row_x_coords = non_transparent[1][row_mask]
+    
+    # Tìm trung tâm của hàng pixel giữa
+    center_x = int(np.mean(middle_row_x_coords))
+    
+    # Tìm vị trí x nhỏ nhất và lớn nhất của vật thể
+    min_x = np.min(non_transparent[1])
+    max_x = np.max(non_transparent[1])
+    
+    # Tìm cả 2 điểm hook
+    (global_top_x, global_top_y), (center_top_x, center_top_y) = get_top_points(expanded_image, center_x, min_x, max_x)
+    
+    # Tạo ảnh với hook tại vị trí điểm cao nhất toàn bộ
+    image_with_hook_global = add_hook_to_image_at_position(expanded_image, hook_resized, global_top_x, global_top_y)
+    hook_border_mask_global = create_inner_circle_border_mask_at_position(expanded_image, hook_resized, border_thickness, global_top_x, global_top_y)
+    main_border_mask_global = create_main_border_mask(image_with_hook_global, border_thickness, border_padding)
+    
+    tmp_image_global = expanded_image.copy()
     if show_hook:
-        tmp_image = image_with_hook.copy()
+        tmp_image_global = image_with_hook_global.copy()
     
-    final_result = apply_borders_to_clean_image(tmp_image, hook_border_mask, main_border_mask, border_color, show_hook)
+    final_result_global = apply_borders_to_clean_image(tmp_image_global, hook_border_mask_global, main_border_mask_global, border_color, show_hook)
     
-    # Bước 6: Lưu ảnh kết quả
-    cv2.imwrite(output_path, final_result)
+    # Tạo ảnh với hook tại vị trí điểm cao nhất tại center
+    image_with_hook_center = add_hook_to_image_at_position(expanded_image, hook_resized, center_top_x, center_top_y)
+    hook_border_mask_center = create_inner_circle_border_mask_at_position(expanded_image, hook_resized, border_thickness, center_top_x, center_top_y)
+    main_border_mask_center = create_main_border_mask(image_with_hook_center, border_thickness, border_padding)
+    
+    tmp_image_center = expanded_image.copy()
+    if show_hook:
+        tmp_image_center = image_with_hook_center.copy()
+    
+    final_result_center = apply_borders_to_clean_image(tmp_image_center, hook_border_mask_center, main_border_mask_center, border_color, show_hook)
+    
+    # Lưu cả 2 phiên bản
+    cv2.imwrite(output_path_global, final_result_global)
+    cv2.imwrite(output_path_center, final_result_center)
     return True
+
+def processed_image(image_path: str, output_path: str, border_thickness_px: int, border_padding_px: int, border_color: str, show_hook: bool):
+    """
+    Hàm tương thích với code cũ - chỉ tạo 1 phiên bản với hook tại điểm cao nhất toàn bộ
+    """
+    filename_without_ext = os.path.splitext(os.path.basename(output_path))[0]
+    output_dir = os.path.dirname(output_path)
+    
+    # Tạo tên file cho cả 2 phiên bản
+    output_path_global = os.path.join(output_dir, f"{filename_without_ext}_global.png")
+    output_path_center = os.path.join(output_dir, f"{filename_without_ext}_center.png")
+    
+    # Gọi hàm xử lý dual hooks
+    result = processed_image_dual_hooks(image_path, output_path_global, output_path_center, border_thickness_px, border_padding_px, border_color, show_hook)
+    
+    # Copy file global thành output_path để tương thích
+    if result:
+        import shutil
+        shutil.copy2(output_path_global, output_path)
+    
+    return result
 
 def check_overlap(expanded_image, hook_y, hook_x, hook_image):
     """Kiểm tra xem móc có overlap với vật thể không"""
@@ -154,9 +236,9 @@ def check_overlap(expanded_image, hook_y, hook_x, hook_image):
                     return True
     return False
 
-def get_top_point(expanded_image, center_x, min_x, max_x):
+def get_top_points(expanded_image, center_x, min_x, max_x):
     """
-    Tìm điểm cao nhất toàn bộ trước, nếu không nằm trong khoảng giới hạn thì dùng điểm cao nhất tại center_x
+    Tìm cả 2 điểm: điểm cao nhất toàn bộ và điểm cao nhất tại center_x
     
     Args:
         expanded_image: Ảnh đã expand
@@ -165,45 +247,97 @@ def get_top_point(expanded_image, center_x, min_x, max_x):
         max_x: Vị trí x lớn nhất của vật thể
     
     Returns:
-        tuple: (top_x, top_y) - tọa độ điểm cao nhất
+        tuple: ((global_top_x, global_top_y), (center_top_x, center_top_y)) - tọa độ của cả 2 điểm
     """
-    # Tính khoảng giới hạn dựa trên min_x và max_x
-    width = max_x - min_x
-    limit_start = min_x + int(width * CONFIG['min_limit_x'])
-    limit_end = min_x + int(width * CONFIG['max_limit_x'])
-
     # Tìm điểm cao nhất toàn bộ
     alpha = expanded_image[:, :, 3]
     non_transparent = np.where(alpha > 0)
     
     if len(non_transparent[0]) > 0:
         # Tìm điểm cao nhất toàn bộ
-        top_y = np.min(non_transparent[0])
+        global_top_y = np.min(non_transparent[0])
         # Tìm tất cả x có cùng y cao nhất
-        top_xs = non_transparent[1][non_transparent[0] == top_y]
+        top_xs = non_transparent[1][non_transparent[0] == global_top_y]
         # Lấy x ở giữa các điểm cao nhất
         global_top_x = int(np.mean(top_xs))
         
-        # Kiểm tra xem điểm cao nhất toàn bộ có nằm trong khoảng giới hạn không
-        if limit_start <= global_top_x <= limit_end:
-            return global_top_x, top_y
+        # Tìm điểm cao nhất tại center_x
+        alpha_column = expanded_image[:, center_x, 3]
+        non_transparent_y = np.where(alpha_column > 0)[0]
+        if len(non_transparent_y) > 0:
+            center_top_y = np.min(non_transparent_y)
+            center_top_x = center_x
         else:
-            # Sử dụng điểm cao nhất tại center_x
-            alpha_column = expanded_image[:, center_x, 3]
-            non_transparent_y = np.where(alpha_column > 0)[0]
-            if len(non_transparent_y) > 0:
-                center_top_y = np.min(non_transparent_y)
-                return center_x, center_top_y
-            else:
-                # Nếu không tìm thấy tại center_x, vẫn dùng điểm cao nhất toàn bộ
-                return global_top_x, top_y
+            # Nếu không tìm thấy tại center_x, dùng điểm cao nhất toàn bộ
+            center_top_x = global_top_x
+            center_top_y = global_top_y
+        
+        return (global_top_x, global_top_y), (center_top_x, center_top_y)
     
     # Fallback: nếu không tìm thấy pixel nào
-    return center_x, 0
+    return (center_x, 0), (center_x, 0)
+
+def add_hook_to_image_at_position(expanded_image, hook_image, hook_center_x, top_y):
+    """
+    Thêm ảnh móc treo vào vị trí cụ thể
+    
+    Args:
+        expanded_image: Ảnh đã expand
+        hook_image: Ảnh móc treo
+        hook_center_x: Tọa độ x trung tâm của móc
+        top_y: Tọa độ y cao nhất của vật thể
+    
+    Returns:
+        Ảnh với móc treo được thêm vào
+    """
+    height, width = expanded_image.shape[:2]
+    hook_height, hook_width = hook_image.shape[:2]
+
+    # Đặt móc ban đầu
+    hook_x = hook_center_x - hook_width // 2
+    hook_y = top_y - hook_height
+    
+    # Di chuyển móc lên trên cho đến khi không còn overlap
+    while check_overlap(expanded_image, hook_y, hook_x, hook_image):
+        hook_y -= 1
+        if hook_y < 0:  # Đảm bảo không vượt quá canvas
+            hook_y = 0
+            break
+    
+    # Đảm bảo móc không bị cắt ra ngoài canvas theo chiều ngang
+    hook_x = max(0, min(hook_x, width - hook_width))
+    
+    # Copy ảnh để tránh thay đổi ảnh gốc
+    result = expanded_image.copy()
+    
+    # Thêm móc vào ảnh
+    for y in range(hook_height):
+        for x in range(hook_width):
+            img_y = hook_y + y
+            img_x = hook_x + x
+            
+            if (0 <= img_y < height and 0 <= img_x < width):
+                hook_alpha = hook_image[y, x, 3] / 255.0
+                
+                if hook_alpha > 0:  # Chỉ blend pixel không trong suốt
+                    # Alpha blending
+                    for c in range(3):  # BGR channels
+                        result[img_y, img_x, c] = (
+                            hook_alpha * hook_image[y, x, c] + 
+                            (1 - hook_alpha) * result[img_y, img_x, c]
+                        ).astype(np.uint8)
+                    
+                    # Cập nhật alpha channel
+                    result[img_y, img_x, 3] = max(
+                        result[img_y, img_x, 3], 
+                        (hook_alpha * 255).astype(np.uint8)
+                    )
+    
+    return result
 
 def add_hook_to_image(expanded_image, hook_image):
     """
-    Thêm ảnh móc treo vào vị trí giữa trên của vật thể
+    Thêm ảnh móc treo vào vị trí giữa trên của vật thể (hàm cũ để tương thích)
     """
     height, width = expanded_image.shape[:2]
     hook_height, hook_width = hook_image.shape[:2]
@@ -255,9 +389,31 @@ def add_hook_to_image(expanded_image, hook_image):
     min_x = np.min(non_transparent[1])
     max_x = np.max(non_transparent[1])
     
-    # Tìm tọa độ điểm cao nhất phù hợp
-    hook_center_x, top_y = get_top_point(expanded_image, center_x, min_x, max_x)
+    # Tìm tọa độ điểm cao nhất phù hợp (sử dụng điểm cao nhất toàn bộ)
+    (global_top_x, global_top_y), (center_top_x, center_top_y) = get_top_points(expanded_image, center_x, min_x, max_x)
+    
+    # Sử dụng điểm cao nhất toàn bộ làm mặc định
+    hook_center_x, top_y = global_top_x, global_top_y
 
+    return add_hook_to_image_at_position(expanded_image, hook_image, hook_center_x, top_y)
+
+def create_inner_circle_border_mask_at_position(expanded_image, hook_image, border_thickness, hook_center_x, top_y):
+    """
+    Tạo mask cho border tròn bên trong móc treo tại vị trí cụ thể
+    
+    Args:
+        expanded_image: Ảnh gốc đã expand (chưa có móc)
+        hook_image: Ảnh móc treo gốc
+        border_thickness: Độ dày của border tròn
+        hook_center_x: Tọa độ x trung tâm của móc
+        top_y: Tọa độ y cao nhất của vật thể
+    
+    Returns:
+        Mask cho border tròn (numpy array)
+    """
+    height, width = expanded_image.shape[:2]
+    hook_height, hook_width = hook_image.shape[:2]
+    
     # Đặt móc ban đầu
     hook_x = hook_center_x - hook_width // 2
     hook_y = top_y - hook_height
@@ -265,40 +421,35 @@ def add_hook_to_image(expanded_image, hook_image):
     # Di chuyển móc lên trên cho đến khi không còn overlap
     while check_overlap(expanded_image, hook_y, hook_x, hook_image):
         hook_y -= 1
-        if hook_y < 0:  # Đảm bảo không vượt quá canvas
+        if hook_y < 0:
             hook_y = 0
             break
     
-    # Đảm bảo móc không bị cắt ra ngoài canvas theo chiều ngang
-    hook_x = max(0, min(hook_x, width - hook_width))
+    # Tìm tâm thực tế của móc
+    hook_alpha = hook_image[:, :, 3]
+    hook_non_transparent = np.where(hook_alpha > 0)
     
-    # Copy ảnh để tránh thay đổi ảnh gốc
-    result = expanded_image.copy()
+    if len(hook_non_transparent[0]) > 0:
+        hook_center_y_relative = int(np.mean(hook_non_transparent[0]))
+        hook_center_x_relative = int(np.mean(hook_non_transparent[1]))
+        
+        hook_center_x_final = hook_x + hook_center_x_relative
+        hook_center_y_final = hook_y + hook_center_y_relative
+    else:
+        hook_center_x_final = hook_x + hook_width // 2
+        hook_center_y_final = hook_y + hook_height // 2
     
-    # Thêm móc vào ảnh
-    for y in range(hook_height):
-        for x in range(hook_width):
-            img_y = hook_y + y
-            img_x = hook_x + x
-            
-            if (0 <= img_y < height and 0 <= img_x < width):
-                hook_alpha = hook_image[y, x, 3] / 255.0
-                
-                if hook_alpha > 0:  # Chỉ blend pixel không trong suốt
-                    # Alpha blending
-                    for c in range(3):  # BGR channels
-                        result[img_y, img_x, c] = (
-                            hook_alpha * hook_image[y, x, c] + 
-                            (1 - hook_alpha) * result[img_y, img_x, c]
-                        ).astype(np.uint8)
-                    
-                    # Cập nhật alpha channel
-                    result[img_y, img_x, 3] = max(
-                        result[img_y, img_x, 3], 
-                        (hook_alpha * 255).astype(np.uint8)
-                    )
+    # Tính bán kính cho đường tròn bên trong
+    inner_radius = int(min(hook_width, hook_height) * CONFIG['inner_radius_ratio'])
     
-    return result
+    # Tạo mask cho border tròn
+    border_mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.circle(border_mask, (hook_center_x_final, hook_center_y_final), inner_radius, 255, border_thickness)
+    
+    # Làm mịn
+    border_mask = cv2.GaussianBlur(border_mask, (3, 3), 0)
+    
+    return border_mask
 
 def create_inner_circle_border_mask(expanded_image, hook_image, border_thickness):
     """
@@ -553,17 +704,22 @@ def process_all_images(input_folder='input', output_folder='output', hook_image_
     for image_file in image_files:
         input_file_path = os.path.join(input_folder, image_file)
         filename_without_ext, ext = os.path.splitext(image_file)
-        output_filename = f"{filename_without_ext}_with_border{ext}"
-        output_file_path = os.path.join(output_folder, output_filename)
+        
+        # Tạo tên file cho cả 2 phiên bản
+        output_filename_global = f"{filename_without_ext}_with_border_global{ext}"
+        output_filename_center = f"{filename_without_ext}_with_border_center{ext}"
+        output_file_path_global = os.path.join(output_folder, output_filename_global)
+        output_file_path_center = os.path.join(output_folder, output_filename_center)
         
         print(f"Đang xử lý: {image_file}")
         
         # Sử dụng giá trị pixel tương đối với ảnh 1000x1000px
         # border_thickness_px: 5px trên ảnh 1000x1000px
         # border_padding_px: 8px trên ảnh 1000x1000px
-        if processed_image(input_file_path, output_file_path, 5, 8, "#f3202c", True):
+        if processed_image_dual_hooks(input_file_path, output_file_path_global, output_file_path_center, 5, 8, "#f3202c", False):
             processed_count += 1
-            print(f"  ✓ Đã lưu: {output_filename}")
+            print(f"  ✓ Đã lưu: {output_filename_global}")
+            print(f"  ✓ Đã lưu: {output_filename_center}")
         else:
             failed_count += 1
             print(f"  ✗ Lỗi khi xử lý: {image_file}")
