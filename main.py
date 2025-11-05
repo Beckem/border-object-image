@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import cv2
+from scipy.interpolate import splprep, splev
 
 HOOK_IMAGE_PATH = "circle.png"
 
@@ -9,8 +10,6 @@ HOOK_IMAGE_PATH = "circle.png"
 CONFIG = {
   "hook_size_min": 40,  # Minimum size of the hook in pixels
   "hook_size_ratio": 0.12,  # Hook size as a percentage of image size
-  "min_limit_x" : 0.4,  # Minimum limit for x coordinate of hook (% of image width)
-  "max_limit_x" : 0.6,  # Maximum limit for x coordinate of hook (% of image width)
   "inner_radius_ratio": 0.23,  # Inner radius of hook border as a percentage of hook size
   "border_color": [64, 21, 243], # Border color in BGR format
 }
@@ -169,8 +168,11 @@ def processed_image_dual_hooks(image_path: str, output_path_global: str, output_
     min_x = np.min(non_transparent[1])
     max_x = np.max(non_transparent[1])
     
+    # Tính điểm chính giữa theo chiều ngang của vật thể
+    center_x_horizontal = (min_x + max_x) // 2
+    
     # Tìm cả 2 điểm hook
-    (global_top_x, global_top_y), (center_top_x, center_top_y) = get_top_points(expanded_image, center_x, min_x, max_x)
+    (global_top_x, global_top_y), (center_top_x, center_top_y) = get_top_points(expanded_image, center_x_horizontal, min_x, max_x)
     
     # Tạo ảnh với hook tại vị trí điểm cao nhất toàn bộ
     image_with_hook_global = add_hook_to_image_at_position(expanded_image, hook_resized, global_top_x, global_top_y)
@@ -236,13 +238,13 @@ def check_overlap(expanded_image, hook_y, hook_x, hook_image):
                     return True
     return False
 
-def get_top_points(expanded_image, center_x, min_x, max_x):
+def get_top_points(expanded_image, center_x_horizontal, min_x, max_x):
     """
-    Tìm cả 2 điểm: điểm cao nhất toàn bộ và điểm cao nhất tại center_x
+    Tìm cả 2 điểm: điểm cao nhất toàn bộ và điểm cao nhất tại center_x_horizontal
     
     Args:
         expanded_image: Ảnh đã expand
-        center_x: Vị trí x trung tâm
+        center_x_horizontal: Vị trí x chính giữa theo chiều ngang của vật thể
         min_x: Vị trí x nhỏ nhất của vật thể
         max_x: Vị trí x lớn nhất của vật thể
     
@@ -261,21 +263,21 @@ def get_top_points(expanded_image, center_x, min_x, max_x):
         # Lấy x ở giữa các điểm cao nhất
         global_top_x = int(np.mean(top_xs))
         
-        # Tìm điểm cao nhất tại center_x
-        alpha_column = expanded_image[:, center_x, 3]
+        # Tìm điểm cao nhất tại center_x_horizontal
+        alpha_column = expanded_image[:, center_x_horizontal, 3]
         non_transparent_y = np.where(alpha_column > 0)[0]
         if len(non_transparent_y) > 0:
             center_top_y = np.min(non_transparent_y)
-            center_top_x = center_x
+            center_top_x = center_x_horizontal
         else:
-            # Nếu không tìm thấy tại center_x, dùng điểm cao nhất toàn bộ
+            # Nếu không tìm thấy tại center_x_horizontal, dùng điểm cao nhất toàn bộ
             center_top_x = global_top_x
             center_top_y = global_top_y
         
         return (global_top_x, global_top_y), (center_top_x, center_top_y)
     
     # Fallback: nếu không tìm thấy pixel nào
-    return (center_x, 0), (center_x, 0)
+    return (center_x_horizontal, 0), (center_x_horizontal, 0)
 
 def add_hook_to_image_at_position(expanded_image, hook_image, hook_center_x, top_y):
     """
@@ -389,8 +391,11 @@ def add_hook_to_image(expanded_image, hook_image):
     min_x = np.min(non_transparent[1])
     max_x = np.max(non_transparent[1])
     
+    # Tính điểm chính giữa theo chiều ngang của vật thể
+    center_x_horizontal = (min_x + max_x) // 2
+    
     # Tìm tọa độ điểm cao nhất phù hợp (sử dụng điểm cao nhất toàn bộ)
-    (global_top_x, global_top_y), (center_top_x, center_top_y) = get_top_points(expanded_image, center_x, min_x, max_x)
+    (global_top_x, global_top_y), (center_top_x, center_top_y) = get_top_points(expanded_image, center_x_horizontal, min_x, max_x)
     
     # Sử dụng điểm cao nhất toàn bộ làm mặc định
     hook_center_x, top_y = global_top_x, global_top_y
@@ -716,7 +721,7 @@ def process_all_images(input_folder='input', output_folder='output', hook_image_
         # Sử dụng giá trị pixel tương đối với ảnh 1000x1000px
         # border_thickness_px: 5px trên ảnh 1000x1000px
         # border_padding_px: 8px trên ảnh 1000x1000px
-        if processed_image_dual_hooks(input_file_path, output_file_path_global, output_file_path_center, 5, 8, "#f3202c", False):
+        if processed_image_dual_hooks(input_file_path, output_file_path_global, output_file_path_center, 3, 5, "#f3202c", True):
             processed_count += 1
             print(f"  ✓ Đã lưu: {output_filename_global}")
             print(f"  ✓ Đã lưu: {output_filename_center}")
